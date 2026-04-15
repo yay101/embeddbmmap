@@ -275,11 +275,42 @@ func ensureSize(region *embeddbmmap.MappedRegion, size int64) error {
 
 ## Platform Support
 
-| Platform | Status |
-|---|---|
-| Linux (amd64) | Full support — `mmap`, `mremap`, `madvise`, `mprotect`, `msync`, `mlock`/`munlock` |
-| macOS | Not supported |
-| Windows | Not supported |
+| Platform | Status | Resize Strategy | Notes |
+|---|---|---|---|
+| Linux (amd64) | **Full support** | `mremap` — atomic, no SIGBUS window | All features available |
+| macOS | **Not supported** | Would need `munmap`+`mmap` fallback | `mremap` unavailable; `Resize` always relocates |
+| Windows | **Not supported** | Would need `UnmapViewOfFile`+`MapViewOfFile` | Completely different API (`CreateFileMapping`, etc.) |
+
+Building on macOS or Windows will succeed, but calling any mmap function will return a descriptive runtime error. `PageSize()` will panic.
+
+### Adding macOS or Windows support
+
+To add support for another platform, create a `mmap_{platform}.go` file with a `//go:build {platform}` tag. The file must implement these functions (see `mmap_linux.go` as reference):
+
+| Function | Linux syscall | macOS equivalent | Windows equivalent |
+|---|---|---|---|
+| `pageSize()` | `unix.Getpagesize()` | Same | `os.Getpagesize()` |
+| `mapFile()` | `SYS_MMAP` | Same POSIX | `CreateFileMapping` + `MapViewOfFile` |
+| `mapAnonymous()` | `SYS_MMAP` MAP_ANON | Same | `CreateFileMapping(INVALID_HANDLE_VALUE)` |
+| `unmap()` | `SYS_MUNMAP` | Same | `UnmapViewOfFile` + `CloseHandle` |
+| `resize()` | `SYS_MREMAP` | `munmap`+`mmap` (always relocates) | `UnmapViewOfFile`+`MapViewOfFile` (always relocates) |
+| `sync()` | `SYS_MSYNC` | Same | `FlushViewOfFile` |
+| `advise()` | `SYS_MADVISE` | Subset | No equivalent — no-op |
+| `protect()` | `SYS_MPROTECT` | Same | `VirtualProtect` |
+| `lock()` | `SYS_MLOCK` | Same | `VirtualLock` |
+| `unlock()` | `SYS_MUNLOCK` | Same | `VirtualUnlock` |
+
+Key differences for non-Linux platforms:
+
+**macOS**: Has the same POSIX mmap API but **no `mremap`**. The `resize()` implementation must:
+1. `mmap` a new region of `newSize` bytes
+2. `memcpy` the old data
+3. `munmap` the old region
+4. Return `relocated=true` (always, since the address changes)
+
+The `Advise` constants `AdviceDontFork`, `AdviceHugePage`, `AdviceNoHugePage`, `AdviceRemove` don't exist on macOS — return `ErrAdviseFailed` or no-op.
+
+**Windows**: Completely different API. `CreateFileMapping` creates a mapping object, `MapViewOfFile` maps it. No `madvise` equivalent. `Protect` uses `VirtualProtect`. File descriptors become `HANDLE`s. The `Map(fd int, ...)` API may need adjustment since `os.File.Fd()` returns a `HANDLE` on Windows.
 
 ## License
 
