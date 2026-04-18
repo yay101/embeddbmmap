@@ -4,7 +4,6 @@ package embeddbmmap
 
 import (
 	"fmt"
-	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -128,7 +127,6 @@ func mapFile(fd int, offset, length int64, prot Protection, flags MapFlag) (*Map
 		fd:     fd,
 		offset: offset,
 	}
-	runtime.SetFinalizer(mr, (*MappedRegion).Unmap)
 	return mr, nil
 }
 
@@ -159,7 +157,6 @@ func mapAnonymous(length int64, prot Protection) (*MappedRegion, error) {
 		flags: flags,
 		fd:    -1,
 	}
-	runtime.SetFinalizer(mr, (*MappedRegion).Unmap)
 	return mr, nil
 }
 
@@ -170,15 +167,17 @@ func (m *MappedRegion) unmap() error {
 	}
 	m.addr = nil
 	m.size = 0
-	runtime.SetFinalizer(m, nil)
 	return nil
 }
 
 func (m *MappedRegion) resize(newSize int64) (relocated bool, err error) {
-	oldAddr := uintptr(m.addr)
+	if newSize <= m.size {
+		return false, nil
+	}
+
 	newAddr, _, errno := unix.Syscall6(
 		unix.SYS_MREMAP,
-		oldAddr,
+		uintptr(m.addr),
 		uintptr(m.size),
 		uintptr(newSize),
 		unix.MREMAP_MAYMOVE,
@@ -189,10 +188,24 @@ func (m *MappedRegion) resize(newSize int64) (relocated bool, err error) {
 		return false, fmt.Errorf("%w: %v", ErrResizeFailed, errno)
 	}
 
-	relocated = newAddr != oldAddr
+	relocated = unsafe.Pointer(newAddr) != m.addr
 	m.addr = unsafe.Pointer(newAddr)
 	m.size = newSize
 	return relocated, nil
+}
+
+func procToUnix(prot Protection) int {
+	p := unix.PROT_NONE
+	if prot&ProtRead != 0 {
+		p |= unix.PROT_READ
+	}
+	if prot&ProtWrite != 0 {
+		p |= unix.PROT_WRITE
+	}
+	if prot&ProtExec != 0 {
+		p |= unix.PROT_EXEC
+	}
+	return p
 }
 
 func (m *MappedRegion) sync(offset, length int64, flags SyncFlag) error {

@@ -2,6 +2,7 @@ package embeddbmmap
 
 import (
 	"errors"
+	"sync"
 	"unsafe"
 )
 
@@ -62,6 +63,7 @@ const (
 )
 
 type MappedRegion struct {
+	mu     sync.RWMutex
 	addr   unsafe.Pointer
 	size   int64
 	prot   Protection
@@ -86,12 +88,18 @@ func (m *MappedRegion) Unmap() error {
 	if m.addr == nil {
 		return ErrNotMapped
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.addr == nil {
+		return ErrNotMapped
+	}
 	return m.unmap()
 }
 
 // Resize grows or shrinks the mapping to newSize bytes.
 // Returns relocated=true if the mapping was moved to a different address.
 // The caller must re-acquire any derived pointers (Pointer, Bytes) after resize.
+// Resize acquires the write lock internally; callers must not hold RLock.
 func (m *MappedRegion) Resize(newSize int64) (relocated bool, err error) {
 	if newSize <= 0 || newSize%int64(PageSize()) != 0 {
 		return false, ErrInvalidSize
@@ -99,6 +107,8 @@ func (m *MappedRegion) Resize(newSize int64) (relocated bool, err error) {
 	if m.addr == nil {
 		return false, ErrNotMapped
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.resize(newSize)
 }
 
@@ -200,6 +210,22 @@ func (m *MappedRegion) UnlockRange(offset, length int64) error {
 		return ErrInvalidSize
 	}
 	return m.unlock(offset, length)
+}
+
+func (m *MappedRegion) RLock() {
+	m.mu.RLock()
+}
+
+func (m *MappedRegion) RUnlock() {
+	m.mu.RUnlock()
+}
+
+func (m *MappedRegion) WriteLock() {
+	m.mu.Lock()
+}
+
+func (m *MappedRegion) WriteUnlock() {
+	m.mu.Unlock()
 }
 
 // Bytes returns a []byte slice covering the entire mapping.
